@@ -81,6 +81,12 @@ export const createMessageSlice = (set, get) => ({
                     
                     // Refresh usage for this character
                     await get().refreshCharacterUsage(characterId);
+                    
+                    // Fallback: Refresh usage again after delay (in case WebSocket event was missed)
+                    setTimeout(() => {
+                        console.log('🔄 Fallback usage refresh for', characterId);
+                        get().refreshCharacterUsage(characterId);
+                    }, 250);
                 }
             } catch (sendError) {
                 console.error('Failed to send message:', sendError);

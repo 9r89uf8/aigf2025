@@ -56,6 +56,11 @@ export const initializeSocket = (server) => {
       // Join user room for private messages
       if (socket.userId) {
         socket.join(`user:${socket.userId}`);
+        logger.info('User joined room', { 
+          userId: socket.userId, 
+          room: `user:${socket.userId}`,
+          allRooms: Array.from(socket.rooms)
+        });
       }
 
       // Join character room if specified
@@ -244,7 +249,10 @@ export const SOCKET_EVENTS = {
   // Error events
   AUTH_ERROR: 'auth:error',
   RATE_LIMIT: 'rate:limit',
-  USAGE_LIMIT: 'usage:limit'
+  USAGE_LIMIT: 'usage:limit',
+  
+  // Usage events
+  USAGE_UPDATE: 'usage:update'
 };
 
 export default {

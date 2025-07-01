@@ -8,6 +8,7 @@
 import { generateSystemPrompt } from '../../models/Character.js';
 import { reorganizeToAlternatingPattern, handleCurrentMessageWithHistory } from './conversationFormatter.js';
 import cache from '../cacheService.js';
+import { config } from '../../config/environment.js';
 import logger from '../../utils/logger.js';
 
 /**
@@ -36,10 +37,108 @@ const getCachedSystemPrompt = async (character) => {
  * @param {Object} currentMessage - Current message being processed
  * @returns {Array} Formatted message array for AI consumption
  */
+/**
+ * Validate context has sufficient conversation history
+ * @param {Object} context - Conversation context
+ * @param {Object} currentMessage - Current message
+ * @returns {Object} Validation result
+ */
+export const validateContext = (context, currentMessage) => {
+  const validation = {
+    isValid: true,
+    warnings: [],
+    errors: [],
+    suggestions: []
+  };
+  
+  // Check if context exists
+  if (!context) {
+    validation.isValid = false;
+    validation.errors.push('Context is null or undefined');
+    return validation;
+  }
+  
+  // Check if messages array exists
+  if (!context.messages || !Array.isArray(context.messages)) {
+    validation.isValid = false;
+    validation.errors.push('Context messages is not an array');
+    return validation;
+  }
+  
+  // Check for minimum context
+  const minMessages = config.ai?.minContextMessages || 2;
+  if (context.messages.length < minMessages) {
+    validation.warnings.push(`Context has only ${context.messages.length} messages, minimum recommended is ${minMessages}`);
+  }
+  
+  // Check for excessive LLM error filtering
+  const errorMessages = context.messages.filter(m => m.hasLLMError === true);
+  if (errorMessages.length > 0) {
+    const errorPercentage = (errorMessages.length / context.messages.length) * 100;
+    if (errorPercentage > 50) {
+      validation.warnings.push(`High percentage of LLM error messages: ${errorPercentage.toFixed(1)}% (${errorMessages.length}/${context.messages.length})`);
+      validation.suggestions.push('Consider investigating why so many messages have LLM errors');
+    }
+  }
+  
+  // Check for conversation balance
+  const userMessages = context.messages.filter(m => m.sender === 'user');
+  const aiMessages = context.messages.filter(m => m.sender === 'character');
+  
+  if (userMessages.length === 0) {
+    validation.warnings.push('No user messages in context');
+  }
+  
+  if (aiMessages.length === 0 && userMessages.length > 1) {
+    validation.warnings.push('No AI messages in context but multiple user messages present');
+  }
+  
+  // Check current message
+  if (!currentMessage || !currentMessage.content) {
+    validation.warnings.push('Current message is empty or missing content');
+  }
+  
+  return validation;
+};
+
 export const buildMessageArray = async (character, context, currentMessage) => {
   const messages = [];
   
   try {
+    // Validate context before processing
+    const contextValidation = validateContext(context, currentMessage);
+    
+    // Log validation results
+    if (contextValidation.warnings.length > 0 || contextValidation.errors.length > 0) {
+      logger.warn('⚠️ CONTEXT VALIDATION ISSUES detected', {
+        characterId: character.id,
+        isValid: contextValidation.isValid,
+        errors: contextValidation.errors,
+        warnings: contextValidation.warnings,
+        suggestions: contextValidation.suggestions,
+        contextMessageCount: context.messages?.length || 0,
+        currentMessageContent: currentMessage.content?.substring(0, 50)
+      });
+    }
+    
+    // If context is invalid, create minimal fallback
+    if (!contextValidation.isValid) {
+      logger.error('❌ CONTEXT VALIDATION FAILED - Creating minimal fallback', {
+        characterId: character.id,
+        errors: contextValidation.errors
+      });
+      
+      return [
+        {
+          role: 'system',
+          content: await getCachedSystemPrompt(character)
+        },
+        {
+          role: 'user',
+          content: currentMessage.content || 'Hello'
+        }
+      ];
+    }
     // System prompt with caching
     const systemPrompt = await getCachedSystemPrompt(character);
     messages.push({
@@ -59,10 +158,38 @@ export const buildMessageArray = async (character, context, currentMessage) => {
     const sortedMessages = [...context.messages].sort((a, b) => 
       new Date(a.timestamp) - new Date(b.timestamp)
     );
+    
+    // DEBUG: Log message sorting and processing
+    logger.debug('🔍 MESSAGE PROCESSING - sorted messages', {
+      characterId: character.id,
+      originalContextMessages: context.messages?.length || 0,
+      sortedMessagesCount: sortedMessages.length,
+      sortedMessageDetails: sortedMessages.map(m => ({
+        id: m.id,
+        sender: m.sender,
+        timestamp: m.timestamp,
+        content: m.content?.substring(0, 30),
+        hasLLMError: m.hasLLMError
+      }))
+    });
 
     
     // Reorganize into alternating pattern for AI consumption
     const alternatingMessages = reorganizeToAlternatingPattern(sortedMessages);
+    
+    // DEBUG: Log pattern reorganization
+    logger.debug('🔍 MESSAGE PROCESSING - alternating pattern', {
+      characterId: character.id,
+      beforeReorganization: sortedMessages.length,
+      afterReorganization: alternatingMessages.length,
+      alternatingMessageDetails: alternatingMessages.map(m => ({
+        id: m.id,
+        sender: m.sender,
+        content: m.content?.substring(0, 30),
+        hasLLMError: m.hasLLMError,
+        _combinedMessages: m._combinedMessages
+      }))
+    });
     
     // Log pattern reorganization for debugging
     if (sortedMessages.length !== alternatingMessages.length) {
@@ -75,6 +202,19 @@ export const buildMessageArray = async (character, context, currentMessage) => {
     
     // Add reorganized conversation history and handle current message
     const finalMessages = handleCurrentMessageWithHistory(alternatingMessages, currentMessage);
+    
+    // DEBUG: Log final message integration
+    logger.debug('🔍 MESSAGE PROCESSING - final messages with current', {
+      characterId: character.id,
+      alternatingMessagesCount: alternatingMessages.length,
+      finalMessagesCount: finalMessages.length,
+      currentMessageContent: currentMessage.content?.substring(0, 50),
+      finalMessageDetails: finalMessages.map(m => ({
+        id: m.id,
+        sender: m.sender,
+        content: m.content?.substring(0, 30)
+      }))
+    });
     
     // Validate that we still have proper conversation flow after filtering
     const userMessageCount = finalMessages.filter(msg => msg.sender === 'user').length;
@@ -95,14 +235,30 @@ export const buildMessageArray = async (character, context, currentMessage) => {
       });
     });
     
+    // DEBUG: Log final AI message array being sent to OpenAI
+    logger.debug('🤖 FINAL AI MESSAGE ARRAY for OpenAI', {
+      characterId: character.id,
+      totalMessages: messages.length,
+      systemMessages: messages.filter(m => m.role === 'system').length,
+      userMessages: messages.filter(m => m.role === 'user').length,
+      assistantMessages: messages.filter(m => m.role === 'assistant').length,
+      messageArray: messages.map((m, idx) => ({
+        index: idx,
+        role: m.role,
+        contentPreview: m.content?.substring(0, 50) + (m.content?.length > 50 ? '...' : '')
+      }))
+    });
+    
     // Enhanced logging for AI message array being sent to LLM
-    logger.debug('AI message array built', {
+    logger.info('✅ AI MESSAGE ARRAY SUCCESSFULLY BUILT', {
       totalMessages: messages.length,
       systemMessages: messages.filter(m => m.role === 'system').length,
       userMessages: messages.filter(m => m.role === 'user').length,
       assistantMessages: messages.filter(m => m.role === 'assistant').length,
       characterId: character.id,
-      tokenSavingsFromFiltering: sortedMessages.length - finalMessages.length
+      tokenSavingsFromFiltering: sortedMessages.length - finalMessages.length,
+      contextValidation: contextValidation.isValid ? 'PASSED' : 'FAILED',
+      contextWarnings: contextValidation.warnings.length
     });
     
     // Detailed logging for debugging (can be disabled in production)

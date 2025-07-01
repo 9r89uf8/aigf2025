@@ -13,7 +13,8 @@
     "seed:clean": "node src/scripts/seedData.js clean",
     "env:generate": "node src/scripts/generateEnv.js",
     "check:env": "node -e \"require('./src/utils/validateEnv.js').validateEnvironment()\"",
-    "check:health": "curl http://localhost:3000/health/detailed | jq"
+    "check:health": "curl http://localhost:3000/health/detailed | jq",
+    "debug:ai-context": "node src/scripts/debugAIContext.js"
   },
   "keywords": [
     "ai",

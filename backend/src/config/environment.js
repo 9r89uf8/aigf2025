@@ -80,7 +80,8 @@ export const config = {
       // Batch operation TTLs
       messageBatch: 600, // 10 minutes (message batch buffer)
       statsBatch: 3600, // 1 hour (stats batch buffer)
-      conversationBuffer: 900 // 15 minutes (conversation buffer)
+      conversationBuffer: 900, // 15 minutes (conversation buffer)
+      conversationContext: 900 // 15 minutes (conversation context cache)
     },
     // Batch operation settings
     batch: {
@@ -115,6 +116,16 @@ export const config = {
   storage: {
     bucket: process.env.STORAGE_BUCKET,
     cdnBaseUrl: process.env.CDN_BASE_URL
+  },
+  
+  // AI Context configuration
+  ai: {
+    // Maximum number of messages to include in conversation context for AI
+    maxContextMessages: parseInt(process.env.AI_MAX_CONTEXT_MESSAGES || '50'), // Increased from 20 to 50 for debugging
+    // Minimum number of messages to ensure context has substance
+    minContextMessages: parseInt(process.env.AI_MIN_CONTEXT_MESSAGES || '2'),
+    // Enable debug logging for AI context
+    debugContext: process.env.AI_DEBUG_CONTEXT === 'true' || process.env.NODE_ENV === 'development'
   }
 };
 

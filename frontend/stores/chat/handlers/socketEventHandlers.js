@@ -68,7 +68,23 @@ export const setupSocketEventHandlers = (socketClient, get) => {
 
     // Usage events
     socketClient.on('usage:update', (data) => {
+        console.log('🎯 USAGE UPDATE EVENT RECEIVED:', {
+            data,
+            timestamp: new Date().toISOString(),
+            characterId: data.characterId,
+            usage: data.usage,
+            currentStoreState: get().characterUsage.get(data.characterId)
+        });
+        
         get().updateUsage(data);
+        
+        // Verify update worked
+        setTimeout(() => {
+            console.log('🎯 USAGE AFTER UPDATE:', {
+                characterId: data.characterId,
+                newStoreState: get().characterUsage.get(data.characterId)
+            });
+        }, 100);
     });
 
     // Natural Message Queuing System events

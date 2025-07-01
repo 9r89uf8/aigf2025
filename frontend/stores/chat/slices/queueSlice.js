@@ -91,6 +91,11 @@ export const createQueueSlice = (set, get) => ({
         
         console.log('📊 Queue status update:', { conversationId, queueLength, queueState });
         
+        // Check if queue just became idle (all messages processed)
+        const previousStatus = get().queueStatus.get(conversationId);
+        const queueBecameIdle = queueState === 'idle' && queueLength === 0 && 
+                               previousStatus?.hasQueuedMessages === true;
+        
         set(state => {
             const queueStatus = new Map(state.queueStatus);
             queueStatus.set(conversationId, {
@@ -102,6 +107,17 @@ export const createQueueSlice = (set, get) => ({
 
             return { queueStatus };
         });
+        
+        // Refresh usage when queue becomes idle (all queued messages processed)
+        if (queueBecameIdle) {
+            const characterId = conversationId.split('_')[1];
+            if (characterId) {
+                setTimeout(() => {
+                    console.log('🔄 Queue idle - refreshing usage for', characterId);
+                    get().refreshCharacterUsage(characterId);
+                }, 500);
+            }
+        }
     },
 
     /**

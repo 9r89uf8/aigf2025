@@ -12,6 +12,7 @@ import { generateTextResponse, generateAudioResponse, generateMediaResponse } fr
 import { filterContent, getFilteredResponseMessage } from './contentFilter.js';
 import { cacheResponsePattern } from './cacheManager.js';
 import { DEFAULT_AI_SETTINGS } from '../../config/deepseek.js';
+import { config } from '../../config/environment.js';
 import logger from '../../utils/logger.js';
 
 /**
@@ -35,14 +36,41 @@ export const generateAIResponse = async ({
       throw new Error('Character not found');
     }
     
-    // Get conversation context
+    // Get conversation context with configurable size
     const context = await getConversationContext(conversationId, {
-      maxMessages: 20,
+      maxMessages: config.ai.maxContextMessages, // Use configurable context size
       includeSystemPrompt: true
+    });
+    
+    // DEBUG: Log raw context retrieved
+    logger.debug('🔍 RAW CONTEXT retrieved for AI generation', {
+      conversationId,
+      totalMessages: context.messages?.length || 0,
+      messageCount: context.messageCount || 0,
+      contextMessageIds: context.messages?.map(m => ({ id: m.id, sender: m.sender, content: m.content?.substring(0, 30) })) || [],
+      startedAt: context.startedAt,
+      lastMessageAt: context.lastMessageAt
     });
     
     // Build messages array for AI
     const messages = await buildMessageArray(character, context, message);
+    
+    // DEBUG: Log final AI message array
+    if (config.ai.debugContext) {
+      logger.debug('🤖 FINAL AI MESSAGE ARRAY sent to OpenAI', {
+        conversationId,
+        messageCount: messages.length,
+        contextSize: context.messages?.length || 0,
+        finalMessages: messages.map((msg, index) => ({
+          index,
+          role: msg.role,
+          contentLength: msg.content?.length || 0,
+          contentPreview: msg.content?.substring(0, 100) + (msg.content?.length > 100 ? '...' : ''),
+          isSystemPrompt: msg.role === 'system',
+          isCurrentMessage: index === messages.length - 1 && msg.role === 'user'
+        }))
+      });
+    }
     
     // Get AI settings - force DeepSeek model regardless of character settings
     const aiSettings = {

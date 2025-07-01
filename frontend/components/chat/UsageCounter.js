@@ -4,17 +4,28 @@
  */
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import useChatStore from '@/stores/chatStore';
 import useAuthStore from '@/stores/authStore';
 
 export default function UsageCounter({ characterId, className = '' }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const { getCharacterUsage } = useChatStore();
+  const { getCharacterUsage, characterUsage } = useChatStore();
   const { isPremium } = useAuthStore();
   
   // Get usage for specific character
   const usage = getCharacterUsage(characterId);
+
+  // Debug logging for usage changes
+  useEffect(() => {
+    console.log('📊 USAGE COUNTER DEBUG:', {
+      characterId,
+      usage,
+      storeSize: characterUsage.size,
+      timestamp: new Date().toISOString(),
+      allCharacterIds: Array.from(characterUsage.keys())
+    });
+  }, [characterId, usage, characterUsage]);
 
   // Don't show for premium users
   if (isPremium) {

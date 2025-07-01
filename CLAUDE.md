@@ -362,6 +362,15 @@ When working with messaging operations, the optimization is automatic. Direct Fi
 
 ## Current Development Priority
 
+### Real-time Usage Counter Updates
+- **Issue**: UsageCounter component shows incorrect messageCount when multiple messages are sent/queued
+- **Discovery**: Real-time usage tracking is already implemented but not working properly
+- **Plans**: 
+  - `USAGE_COUNTER_REALTIME_FIX_PLAN.md` - Original implementation plan
+  - `USAGE_COUNTER_REALTIME_DEBUG_PLAN.md` - Debug steps after discovering existing implementation
+  - `USAGE_COUNTER_ACTION_PLAN.md` - Comprehensive action plan with debugging and fixes
+- **Status**: Ready for debugging and implementation of fixes
+
 
 
 

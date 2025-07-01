@@ -76,7 +76,17 @@ export const createUsageSlice = (set, get) => ({
     updateCharacterUsage: (characterId, usage) => {
         set(state => {
             const newCharacterUsage = new Map(state.characterUsage);
+            // Delete and re-add to ensure change detection in Map
+            newCharacterUsage.delete(characterId);
             newCharacterUsage.set(characterId, usage);
+            
+            console.log('🔄 STORE: Forcing usage update', { 
+                characterId, 
+                usage,
+                mapSize: newCharacterUsage.size,
+                timestamp: new Date().toISOString()
+            });
+            
             return { characterUsage: newCharacterUsage };
         });
     },

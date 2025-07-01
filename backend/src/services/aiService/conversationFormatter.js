@@ -33,19 +33,48 @@ export const reorganizeToAlternatingPattern = (chronologicalMessages) => {
     return true;
   });
   
-  // Log filtering results for monitoring
+  // DEBUG: Enhanced logging for LLM error filtering
   const filteredCount = chronologicalMessages.length - filteredMessages.length;
+  logger.debug('🔍 CONVERSATION FORMATTER - LLM error filtering', {
+    originalCount: chronologicalMessages.length,
+    filteredCount,
+    remainingCount: filteredMessages.length,
+    originalMessages: chronologicalMessages.map(m => ({
+      id: m.id,
+      sender: m.sender,
+      hasLLMError: m.hasLLMError,
+      content: m.content?.substring(0, 30)
+    })),
+    filteredMessages: filteredMessages.map(m => ({
+      id: m.id,
+      sender: m.sender,
+      hasLLMError: m.hasLLMError,
+      content: m.content?.substring(0, 30)
+    }))
+  });
+  
   if (filteredCount > 0) {
-    logger.info('Filtered LLM error messages from AI context', {
+    logger.warn('⚠️ SIGNIFICANT MESSAGE FILTERING - Many messages removed due to LLM errors', {
       originalCount: chronologicalMessages.length,
       filteredCount,
-      remainingCount: filteredMessages.length
+      remainingCount: filteredMessages.length,
+      percentageFiltered: Math.round((filteredCount / chronologicalMessages.length) * 100)
     });
   }
 
   
   const alternatingMessages = [];
   let pendingUserMessages = []; // Buffer for consecutive user messages
+  
+  // DEBUG: Log before alternating pattern creation
+  logger.debug('🔍 CONVERSATION FORMATTER - starting alternating pattern creation', {
+    filteredMessagesCount: filteredMessages.length,
+    filteredMessagesDetails: filteredMessages.map(m => ({
+      id: m.id,
+      sender: m.sender,
+      content: m.content?.substring(0, 30)
+    }))
+  });
   
   for (const message of filteredMessages) {
     // Handle edge case: unknown sender types
@@ -84,6 +113,19 @@ export const reorganizeToAlternatingPattern = (chronologicalMessages) => {
       alternatingMessages.push(combinedUserMessage);
     }
   }
+  
+  // DEBUG: Log final alternating pattern result
+  logger.debug('🔍 CONVERSATION FORMATTER - alternating pattern complete', {
+    originalMessagesCount: chronologicalMessages.length,
+    filteredMessagesCount: filteredMessages.length,
+    alternatingMessagesCount: alternatingMessages.length,
+    alternatingMessagesDetails: alternatingMessages.map(m => ({
+      id: m.id,
+      sender: m.sender,
+      content: m.content?.substring(0, 30),
+      _combinedMessages: m._combinedMessages
+    }))
+  });
   
   // Edge case: Conversation starts with AI message (shouldn't happen but handle gracefully)
   if (alternatingMessages.length > 0 && alternatingMessages[0].sender === 'character') {

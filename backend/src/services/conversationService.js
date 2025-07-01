@@ -233,7 +233,8 @@ const addMessageBatched = async (conversationId, message) => {
     currentBuffer.messages.push(message);
     currentBuffer.updates = {
       lastMessageAt: new Date(),
-      messageCount: currentBuffer.messages.length
+      // messageCount should only count user messages for usage tracking
+      messageCount: currentBuffer.messages.filter(msg => msg.sender === 'user').length
     };
     
     // Cache the buffered conversation state
@@ -264,7 +265,8 @@ const addMessageBatched = async (conversationId, message) => {
     if (conversationCache) {
       conversationCache.messages = [...(conversationCache.messages || []), message];
       conversationCache.lastMessageAt = new Date();
-      conversationCache.messageCount = conversationCache.messages.length;
+      // messageCount should only count user messages for usage tracking
+      conversationCache.messageCount = conversationCache.messages.filter(msg => msg.sender === 'user').length;
       await cache.set(cache.keys.conversation(userId, characterId), conversationCache, config.redis.ttl.conversation);
     }
     
@@ -278,7 +280,7 @@ const addMessageBatched = async (conversationId, message) => {
     // Update context cache incrementally (Phase 3)
     try {
       await contextManager.updateContext(conversationId, message, {
-        maxMessages: 20,
+        maxMessages: config.ai?.maxContextMessages || 50, // Use configurable context size
         includeSystemPrompt: true,
         includeTimestamps: false
       });
@@ -318,7 +320,8 @@ const addMessageDirect = async (conversationId, message) => {
     const updates = {
       messages: updatedMessages,
       lastMessageAt: new Date(),
-      messageCount: updatedMessages.length
+      // messageCount should only count user messages for usage tracking
+      messageCount: updatedMessages.filter(msg => msg.sender === 'user').length
     };
     
     await conversationRef.update(updates);
@@ -765,7 +768,7 @@ export const getLastMessage = async (userId, characterId) => {
  */
 export const getConversationContext = async (conversationId, options = {}) => {
   const { 
-    maxMessages = 20, 
+    maxMessages = config.ai?.maxContextMessages || 50, // Use configurable default
     includeSystemPrompt = true,
     includeTimestamps = false 
   } = options;
@@ -790,6 +793,28 @@ export const getConversationContext = async (conversationId, options = {}) => {
           new Date(a.timestamp) - new Date(b.timestamp)
         );
         
+        // DEBUG: Log conversation context retrieval
+        logger.debug('🔍 CONVERSATION CONTEXT - message retrieval', {
+          conversationId,
+          totalMessagesInConversation: allMessages.length,
+          maxMessages,
+          sortedMessagesCount: sortedMessages.length,
+          allMessagesSummary: allMessages.map(m => ({
+            id: m.id,
+            sender: m.sender,
+            timestamp: m.timestamp,
+            content: m.content?.substring(0, 30),
+            hasLLMError: m.hasLLMError
+          })),
+          sortedMessagesSummary: sortedMessages.map(m => ({
+            id: m.id,
+            sender: m.sender,
+            timestamp: m.timestamp,
+            content: m.content?.substring(0, 30),
+            hasLLMError: m.hasLLMError
+          }))
+        });
+        
         // Take recent messages after sorting - preserve ALL fields for AI processing
         const messages = sortedMessages
           .slice(-maxMessages)
@@ -798,6 +823,19 @@ export const getConversationContext = async (conversationId, options = {}) => {
             // id, hasLLMError, errorType, audioData, mediaData, etc.
             return { ...msg };
           });
+          
+        // DEBUG: Log final context messages being passed to AI
+        logger.debug('🔍 CONVERSATION CONTEXT - final context', {
+          conversationId,
+          contextMessagesCount: messages.length,
+          contextMessages: messages.map(m => ({
+            id: m.id,
+            sender: m.sender,
+            timestamp: m.timestamp,
+            content: m.content?.substring(0, 30),
+            hasLLMError: m.hasLLMError
+          }))
+        });
         
         return {
           conversationId,

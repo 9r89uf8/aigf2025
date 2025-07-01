@@ -6,6 +6,7 @@ import { getRedisClient } from '../config/redis.js';
 import cache from './cacheService.js';
 import { config } from '../config/environment.js';
 import { ApiError } from '../middleware/errorHandler.js';
+import { emitToUser, SOCKET_EVENTS } from '../config/socket.js';
 import logger from '../utils/logger.js';
 
 /**
@@ -74,6 +75,29 @@ export const canSendMessage = async (userId, characterId, messageType, isPremium
     const limit = limits[messageType] || 0;
     
     if (messageCount >= limit) {
+      // Emit usage limit reached event
+      try {
+        const formattedUsage = {
+          text: { used: usage.textMessages || 0, limit: 30 },
+          image: { used: usage.mediaMessages || 0, limit: 5 },
+          audio: { used: usage.audioMessages || 0, limit: 5 }
+        };
+        
+        emitToUser(userId, SOCKET_EVENTS.USAGE_LIMIT, {
+          characterId,
+          messageType,
+          limit,
+          used: messageCount,
+          remaining: 0,
+          resetAt: usage.resetAt,
+          usage: formattedUsage
+        });
+        
+        logger.debug('Usage limit reached event emitted', { userId, characterId, messageType, limit });
+      } catch (emitError) {
+        logger.error('Failed to emit usage limit event (non-blocking):', emitError);
+      }
+      
       return { 
         canSend: false, 
         reason: 'limit_reached',
@@ -131,6 +155,46 @@ export const incrementUsage = async (userId, characterId, messageType) => {
     
     logger.debug('Usage incremented', { userId, characterId, messageType, newCount: usage[messageKey] });
     
+    // Emit usage update via WebSocket for real-time UI updates
+    try {
+      // Format usage data to match frontend expectations
+      const formattedUsage = {
+        text: { used: usage.textMessages || 0, limit: 30 },
+        image: { used: usage.mediaMessages || 0, limit: 5 },
+        audio: { used: usage.audioMessages || 0, limit: 5 }
+      };
+      
+      logger.info('🔍 USAGE DEBUG: Emitting usage update', {
+        userId,
+        characterId,
+        formattedUsage,
+        event: SOCKET_EVENTS.USAGE_UPDATE,
+        timestamp: new Date().toISOString()
+      });
+
+      emitToUser(userId, SOCKET_EVENTS.USAGE_UPDATE, {
+        characterId,
+        usage: formattedUsage
+      });
+      
+      // Add room status diagnostics
+      const { getSocketIO } = await import('../config/socket.js');
+      const io = getSocketIO();
+      const userRoom = `user:${userId}`;
+      const roomSize = io.sockets.adapter.rooms.get(userRoom)?.size || 0;
+      logger.info('🔍 USAGE DEBUG: User room status', {
+        userId,
+        userRoom,
+        roomSize,
+        hasActiveConnections: roomSize > 0
+      });
+      
+      logger.debug('Usage update emitted via WebSocket', { userId, characterId, formattedUsage });
+    } catch (emitError) {
+      logger.error('Failed to emit usage update (non-blocking):', emitError);
+      // Don't fail the increment operation if WebSocket emit fails
+    }
+    
     return usage;
   } catch (error) {
     logger.error('Error incrementing usage:', error);
@@ -160,6 +224,24 @@ export const resetUsage = async (userId, characterId) => {
     await cache.set(key, resetUsage, config.redis.ttl.usage);
     
     logger.info('Usage reset', { userId, characterId });
+    
+    // Emit usage update via WebSocket for real-time UI updates
+    try {
+      const formattedUsage = {
+        text: { used: 0, limit: 30 },
+        image: { used: 0, limit: 5 },
+        audio: { used: 0, limit: 5 }
+      };
+      
+      emitToUser(userId, SOCKET_EVENTS.USAGE_UPDATE, {
+        characterId,
+        usage: formattedUsage
+      });
+      
+      logger.debug('Usage reset emitted via WebSocket', { userId, characterId });
+    } catch (emitError) {
+      logger.error('Failed to emit usage reset (non-blocking):', emitError);
+    }
   } catch (error) {
     logger.error('Error resetting usage:', error);
     throw error;
