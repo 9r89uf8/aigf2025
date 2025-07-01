@@ -166,6 +166,29 @@ export const initializeQueues = () => {
     }
   });
 
+  // Stats sync queue (Phase 2 optimization)
+  const statsSyncQueue = createQueue('stats-sync', {
+    defaultJobOptions: {
+      removeOnComplete: 100,
+      attempts: 2,
+      repeat: {
+        every: 60000 // Run every 60 seconds
+      }
+    }
+  });
+
+  // Batch write queue (Phase 1 optimization)
+  const batchWriteQueue = createQueue('batch-writes', {
+    defaultJobOptions: {
+      removeOnComplete: 50,
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000
+      }
+    }
+  });
+
   logger.info('Standard queues initialized');
 
   return {
@@ -173,7 +196,9 @@ export const initializeQueues = () => {
     aiQueue,
     mediaQueue,
     analyticsQueue,
-    emailQueue
+    emailQueue,
+    statsSyncQueue,
+    batchWriteQueue
   };
 };
 

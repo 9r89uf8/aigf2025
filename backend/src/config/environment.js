@@ -76,7 +76,19 @@ export const config = {
       userProfile: 3600, // 1 hour (user profiles change occasionally)
       character: 21600, // 6 hours (character data changes rarely)
       conversation: 1800, // 30 minutes (conversations change frequently)
-      usage: 86400 // 24 hours (daily usage tracking reset)
+      usage: 86400, // 24 hours (daily usage tracking reset)
+      // Batch operation TTLs
+      messageBatch: 600, // 10 minutes (message batch buffer)
+      statsBatch: 3600, // 1 hour (stats batch buffer)
+      conversationBuffer: 900 // 15 minutes (conversation buffer)
+    },
+    // Batch operation settings
+    batch: {
+      flushInterval: parseInt(process.env.REDIS_BATCH_FLUSH_INTERVAL || '5000'), // 5 seconds
+      maxBufferSize: parseInt(process.env.REDIS_BATCH_MAX_SIZE || '400'), // Max operations before force flush
+      lockTimeout: parseInt(process.env.REDIS_BATCH_LOCK_TIMEOUT || '10000'), // 10 seconds
+      retryAttempts: parseInt(process.env.REDIS_BATCH_RETRY_ATTEMPTS || '3'),
+      enableBatching: process.env.REDIS_ENABLE_BATCHING !== 'false' // Enable by default
     }
   },
   

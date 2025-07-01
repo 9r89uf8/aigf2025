@@ -1,6 +1,7 @@
 /**
  * Conversation service
  * Handles conversation and message operations
+ * Enhanced with Firebase optimization batching (Phase 1) and smart context caching (Phase 3)
  */
 import { getFirebaseFirestore } from '../config/firebase.js';
 import { 
@@ -15,6 +16,9 @@ import { ApiError } from '../middleware/errorHandler.js';
 import cache from './cacheService.js';
 import { config } from '../config/environment.js';
 import logger from '../utils/logger.js';
+import messageBatcher, { OperationType } from './messageBatcher.js';
+import contextManager from './aiService/contextManager.js';
+import writeBehindProcessor, { WriteBehindOperation } from '../queues/writeBehindProcessor.js';
 
 const CONVERSATIONS_COLLECTION = 'conversations';
 
@@ -162,14 +166,15 @@ export const getUserConversations = async (userId, options = {}) => {
 };
 
 /**
- * Add message to conversation
+ * Add message to conversation (Optimized with batching - Phase 1)
  * @param {string} conversationId - Conversation ID
  * @param {Object} messageData - Message data
  * @param {Date} [explicitTimestamp] - Optional explicit timestamp (for preserving original receive time)
  * @param {string} [providedId] - Optional pre-generated message ID (for consistent frontend-backend IDs)
+ * @param {boolean} [useBatching=true] - Whether to use batching optimization
  * @returns {Promise<Object>} Added message
  */
-export const addMessage = async (conversationId, messageData, explicitTimestamp = null, providedId = null) => {
+export const addMessage = async (conversationId, messageData, explicitTimestamp = null, providedId = null, useBatching = true) => {
   try {
     // Debug logging to track message additions
     logger.debug('addMessage called', {
@@ -178,6 +183,8 @@ export const addMessage = async (conversationId, messageData, explicitTimestamp 
       messageSender: messageData.sender,
       messageContent: messageData.content?.substring(0, 50),
       providedId,
+      useBatching,
+      batchingEnabled: config.redis.batch.enableBatching,
       stackTrace: new Error().stack.split('\n').slice(1, 4).map(line => line.trim())
     });
     
@@ -187,6 +194,114 @@ export const addMessage = async (conversationId, messageData, explicitTimestamp 
       throw new ApiError(400, `Invalid message: ${validation.errors.join(', ')}`);
     }
     
+    // Generate message ID if not provided
+    const firestore = getFirebaseFirestore();
+    const messageId = providedId || firestore.collection('_').doc().id;
+    const message = {
+      ...defaultMessage,
+      ...messageData,
+      id: messageId,
+      timestamp: explicitTimestamp || new Date()
+    };
+    
+    // Use batching if enabled and configured
+    if (useBatching && config.redis.batch.enableBatching) {
+      return await addMessageBatched(conversationId, message);
+    } else {
+      return await addMessageDirect(conversationId, message);
+    }
+    
+  } catch (error) {
+    logger.error('Error adding message:', error);
+    throw error;
+  }
+};
+
+/**
+ * Add message using batching system (optimized path)
+ * @param {string} conversationId - Conversation ID
+ * @param {Object} message - Complete message object
+ * @returns {Promise<Object>} Added message
+ */
+const addMessageBatched = async (conversationId, message) => {
+  try {
+    // Update conversation in Redis buffer first for immediate consistency
+    const bufferKey = cache.keys.conversationBuffer(conversationId);
+    const currentBuffer = await cache.get(bufferKey) || { messages: [], updates: {} };
+    
+    // Add message to buffer
+    currentBuffer.messages.push(message);
+    currentBuffer.updates = {
+      lastMessageAt: new Date(),
+      messageCount: currentBuffer.messages.length
+    };
+    
+    // Cache the buffered conversation state
+    await cache.set(bufferKey, currentBuffer, config.redis.ttl.conversationBuffer);
+    
+    // Add to batch queue for Firebase write
+    const batchOperation = {
+      type: OperationType.ADD_MESSAGE,
+      target: conversationId,
+      data: { message },
+      metadata: {
+        userId: conversationId.split('_')[0],
+        characterId: conversationId.split('_')[1],
+        timestamp: Date.now()
+      }
+    };
+    
+    const batchSuccess = await messageBatcher.addOperation(batchOperation);
+    
+    if (!batchSuccess) {
+      logger.warn('Batch operation failed, falling back to direct write', { conversationId });
+      return await addMessageDirect(conversationId, message);
+    }
+    
+    // Update conversation cache with buffered data
+    const [userId, characterId] = conversationId.split('_');
+    const conversationCache = await cache.get(cache.keys.conversation(userId, characterId));
+    if (conversationCache) {
+      conversationCache.messages = [...(conversationCache.messages || []), message];
+      conversationCache.lastMessageAt = new Date();
+      conversationCache.messageCount = conversationCache.messages.length;
+      await cache.set(cache.keys.conversation(userId, characterId), conversationCache, config.redis.ttl.conversation);
+    }
+    
+    logger.debug('Message added to batch queue', { 
+      conversationId, 
+      messageId: message.id, 
+      sender: message.sender,
+      type: message.type 
+    });
+    
+    // Update context cache incrementally (Phase 3)
+    try {
+      await contextManager.updateContext(conversationId, message, {
+        maxMessages: 20,
+        includeSystemPrompt: true,
+        includeTimestamps: false
+      });
+    } catch (contextError) {
+      logger.error('Error updating context cache:', contextError);
+    }
+    
+    return message;
+    
+  } catch (error) {
+    logger.error('Error in batched message add, falling back to direct:', error);
+    return await addMessageDirect(conversationId, message);
+  }
+};
+
+/**
+ * Add message directly to Firebase (fallback path)
+ * @param {string} conversationId - Conversation ID
+ * @param {Object} message - Complete message object
+ * @returns {Promise<Object>} Added message
+ */
+const addMessageDirect = async (conversationId, message) => {
+  try {
     const firestore = getFirebaseFirestore();
     const conversationRef = firestore.collection(CONVERSATIONS_COLLECTION).doc(conversationId);
     
@@ -198,16 +313,6 @@ export const addMessage = async (conversationId, messageData, explicitTimestamp 
     
     const conversation = conversationDoc.data();
     
-    // Use provided ID if available, otherwise generate Firebase ID
-    // This enables consistent IDs from frontend through to Firebase storage
-    const messageId = providedId || firestore.collection('_').doc().id;
-    const message = {
-      ...defaultMessage,
-      ...messageData,
-      id: messageId,
-      timestamp: explicitTimestamp || new Date() // Use explicit timestamp if provided
-    };
-    
     // Update conversation
     const updatedMessages = [...(conversation.messages || []), message];
     const updates = {
@@ -218,23 +323,29 @@ export const addMessage = async (conversationId, messageData, explicitTimestamp 
     
     await conversationRef.update(updates);
     
-    // Invalidate caches
+    // Track direct Firebase write in metrics
+    logger.firebaseOp('write', { conversationId, direct: true });
+    
+    // Invalidate caches (Phase 3: use smart invalidation)
     const [userId, characterId] = conversationId.split('_');
     await cache.del(cache.keys.conversation(userId, characterId));
     await cache.del(cache.keys.conversationMeta(conversationId));
-    await cache.del(cache.keys.conversationContext(conversationId));
     await cache.del(cache.keys.userConversations(userId));
     
-    logger.debug('Message added to conversation', { 
+    // Use context manager for smart context invalidation
+    await contextManager.invalidateContext(conversationId);
+    
+    logger.debug('Message added directly to Firebase', { 
       conversationId, 
-      messageId, 
+      messageId: message.id, 
       sender: message.sender,
       type: message.type 
     });
     
     return message;
+    
   } catch (error) {
-    logger.error('Error adding message:', error);
+    logger.error('Error in direct message add:', error);
     throw error;
   }
 };
@@ -342,35 +453,91 @@ export const markMessagesAsRead = async (conversationId, messageIds) => {
 };
 
 /**
- * Mark a user message as answered by AI
+ * Mark a user message as answered by AI (Optimized with write-behind - Phase 4)
+ * @param {string} conversationId - Conversation ID
+ * @param {string} messageId - Message ID to mark as answered
+ * @param {boolean} [useWriteBehind=true] - Whether to use write-behind pattern
+ * @returns {Promise<void>}
+ */
+export const markMessageAsAnswered = async (conversationId, messageId, useWriteBehind = true) => {
+  try {
+    // Update cache immediately for consistency
+    const cacheKey = cache.keys.conversation(conversationId.split('_')[0], conversationId.split('_')[1]);
+    const cachedConversation = await cache.get(cacheKey);
+    
+    if (cachedConversation && cachedConversation.messages) {
+      // Update hasAIResponse in cached conversation
+      const updatedMessages = cachedConversation.messages.map(msg => {
+        if (msg.id === messageId && msg.sender === 'user') {
+          return { ...msg, hasAIResponse: true };
+        }
+        return msg;
+      });
+      
+      cachedConversation.messages = updatedMessages;
+      await cache.set(cacheKey, cachedConversation, config.redis.ttl.conversation);
+    }
+    
+    // Use write-behind pattern if enabled
+    if (useWriteBehind && config.redis.batch.enableBatching) {
+      // Queue the status update for write-behind processing
+      const operation = {
+        type: WriteBehindOperation.MESSAGE_STATUS,
+        collection: CONVERSATIONS_COLLECTION,
+        documentId: conversationId,
+        data: {
+          messageId,
+          updates: { hasAIResponse: true }
+        },
+        priority: 10, // Medium priority for status updates
+        dedupeKey: `status:${conversationId}:${messageId}:answered`
+      };
+      
+      const queued = await writeBehindProcessor.queueWriteBehind(operation);
+      
+      if (!queued) {
+        logger.warn('Failed to queue status update, falling back to direct write');
+        await markMessageAsAnsweredDirect(conversationId, messageId);
+      } else {
+        logger.debug('Message status update queued for write-behind', { 
+          conversationId, 
+          messageId 
+        });
+      }
+    } else {
+      // Direct write if write-behind is disabled
+      await markMessageAsAnsweredDirect(conversationId, messageId);
+    }
+    
+  } catch (error) {
+    logger.error('Error marking message as answered:', error);
+    throw error;
+  }
+};
+
+/**
+ * Mark message as answered directly in Firebase (fallback)
  * @param {string} conversationId - Conversation ID
  * @param {string} messageId - Message ID to mark as answered
  * @returns {Promise<void>}
  */
-export const markMessageAsAnswered = async (conversationId, messageId) => {
+const markMessageAsAnsweredDirect = async (conversationId, messageId) => {
   try {
-    
     const firestore = getFirebaseFirestore();
     const conversationRef = firestore.collection(CONVERSATIONS_COLLECTION).doc(conversationId);
     
     const conversationDoc = await conversationRef.get();
     if (!conversationDoc.exists) {
-      logger.error('🎯 MARK_ANSWERED: Conversation not found', { conversationId });
+      logger.error('Conversation not found for marking answered', { conversationId });
       throw new ApiError(404, 'Conversation not found');
     }
     
     const conversation = conversationDoc.data();
     
-    // Find the target message before updating
-    const targetMessage = (conversation.messages || []).find(msg => msg.id === messageId);
-
-
-    
     // Update the specific message's hasAIResponse field
     const updatedMessages = (conversation.messages || []).map(msg => {
       if (msg.id === messageId && msg.sender === 'user') {
-        const updatedMsg = { ...msg, hasAIResponse: true };
-        return updatedMsg;
+        return { ...msg, hasAIResponse: true };
       }
       return msg;
     });
@@ -381,9 +548,11 @@ export const markMessageAsAnswered = async (conversationId, messageId) => {
     const [userId, characterId] = conversationId.split('_');
     await cache.del(cache.keys.conversation(userId, characterId));
     await cache.del(cache.keys.conversationMeta(conversationId));
-    await cache.del(cache.keys.conversationContext(conversationId));
-
+    await contextManager.invalidateContext(conversationId);
+    
+    logger.debug('Message marked as answered directly', { conversationId, messageId });
   } catch (error) {
+    logger.error('Error in direct mark as answered:', error);
     throw error;
   }
 };
@@ -534,6 +703,39 @@ export const searchMessages = async (conversationId, query) => {
 };
 
 /**
+ * Get conversation from buffer or cache (Phase 3 optimization)
+ * Checks Redis buffer first, then falls back to Firebase
+ * @param {string} conversationId - Conversation ID
+ * @returns {Promise<Object|null>} Conversation data
+ */
+const getConversationFromBuffer = async (conversationId) => {
+  try {
+    // First check Redis buffer (from Phase 1)
+    const bufferKey = cache.keys.conversationBuffer(conversationId);
+    const bufferedData = await cache.get(bufferKey);
+    
+    if (bufferedData && bufferedData.messages) {
+      // Merge buffered messages with cached conversation
+      const baseConversation = await getConversationById(conversationId);
+      if (baseConversation) {
+        return {
+          ...baseConversation,
+          messages: [...(baseConversation.messages || []), ...bufferedData.messages],
+          ...bufferedData.updates
+        };
+      }
+    }
+    
+    // Fall back to regular get
+    return await getConversationById(conversationId);
+    
+  } catch (error) {
+    logger.error('Error getting conversation from buffer:', error);
+    return await getConversationById(conversationId);
+  }
+};
+
+/**
  * Get last message between user and character
  * @param {string} userId - User ID
  * @param {string} characterId - Character ID
@@ -556,7 +758,7 @@ export const getLastMessage = async (userId, characterId) => {
 };
 
 /**
- * Get conversation context for AI generation
+ * Get conversation context for AI generation (Optimized with smart caching - Phase 3)
  * @param {string} conversationId - Conversation ID
  * @param {Object} options - Context options
  * @returns {Promise<Object>} Conversation context
@@ -569,12 +771,12 @@ export const getConversationContext = async (conversationId, options = {}) => {
   } = options;
   
   try {
-    // Only cache default context requests (standard AI generation)
-    if (maxMessages === 20 && includeSystemPrompt === true && includeTimestamps === false) {
-      const cacheKey = cache.keys.conversationContext(conversationId);
-      
-      return await cache.getOrSet(cacheKey, async () => {
-        const conversation = await getConversationById(conversationId);
+    // Use the enhanced context manager for multi-layer caching
+    return await contextManager.getContext(
+      conversationId,
+      async () => {
+        // This fetch function is only called on cache miss
+        const conversation = await getConversationFromBuffer(conversationId);
         
         if (!conversation) {
           throw new ApiError(404, 'Conversation not found');
@@ -606,42 +808,9 @@ export const getConversationContext = async (conversationId, options = {}) => {
           startedAt: conversation.startedAt,
           lastMessageAt: conversation.lastMessageAt
         };
-      }, 120); // Cache for 2 minutes - context changes with new messages but AI needs fresh data
-    }
-    
-    // For non-standard requests, fetch directly
-    const conversation = await getConversationById(conversationId);
-    
-    if (!conversation) {
-      throw new ApiError(404, 'Conversation not found');
-    }
-    
-    // Get recent messages with proper chronological sorting
-    const allMessages = conversation.messages || [];
-    
-    // Sort by timestamp to ensure chronological order
-    const sortedMessages = allMessages.sort((a, b) => 
-      new Date(a.timestamp) - new Date(b.timestamp)
+      },
+      options
     );
-    
-    // Take recent messages after sorting - preserve ALL fields for AI processing
-    const messages = sortedMessages
-      .slice(-maxMessages)
-      .map(msg => {
-        // Return the complete message object to preserve all fields including:
-        // id, hasLLMError, errorType, audioData, mediaData, etc.
-        return { ...msg };
-      });
-    
-    return {
-      conversationId,
-      userId: conversation.userId,
-      characterId: conversation.characterId,
-      messages,
-      messageCount: conversation.messages?.length || 0,
-      startedAt: conversation.startedAt,
-      lastMessageAt: conversation.lastMessageAt
-    };
   } catch (error) {
     logger.error('Error getting conversation context:', error);
     throw error;
@@ -752,14 +921,87 @@ export const canSendMessage = async (userId, characterId, messageType, isPremium
 };
 
 /**
- * Like or unlike a message
+ * Like or unlike a message (Optimized with write-behind - Phase 4)
+ * @param {string} conversationId - Conversation ID
+ * @param {string} messageId - Message ID
+ * @param {string} userId - User ID who is liking
+ * @param {boolean} isLiked - Whether to like (true) or unlike (false)
+ * @param {boolean} [useWriteBehind=true] - Whether to use write-behind pattern
+ * @returns {Promise<void>}
+ */
+export const likeMessage = async (conversationId, messageId, userId, isLiked, useWriteBehind = true) => {
+  try {
+    // Update cache immediately for instant feedback
+    const cacheKey = cache.keys.conversation(conversationId.split('_')[0], conversationId.split('_')[1]);
+    const cachedConversation = await cache.get(cacheKey);
+    
+    if (cachedConversation && cachedConversation.messages) {
+      // Update likes in cached conversation
+      const updatedMessages = cachedConversation.messages.map(msg => {
+        if (msg.id === messageId) {
+          if (!msg.likes) msg.likes = {};
+          
+          if (isLiked) {
+            msg.likes[userId] = true;
+          } else {
+            delete msg.likes[userId];
+          }
+        }
+        return msg;
+      });
+      
+      cachedConversation.messages = updatedMessages;
+      await cache.set(cacheKey, cachedConversation, config.redis.ttl.conversation);
+    }
+    
+    // Use write-behind pattern if enabled
+    if (useWriteBehind && config.redis.batch.enableBatching) {
+      // Queue the like operation for write-behind processing
+      const operation = {
+        type: isLiked ? WriteBehindOperation.MESSAGE_LIKE : WriteBehindOperation.MESSAGE_UNLIKE,
+        collection: CONVERSATIONS_COLLECTION,
+        documentId: conversationId,
+        data: {
+          messageId,
+          userId
+        },
+        priority: 5, // Low priority for likes
+        dedupeKey: `like:${conversationId}:${messageId}:${userId}`
+      };
+      
+      const queued = await writeBehindProcessor.queueWriteBehind(operation);
+      
+      if (!queued) {
+        logger.warn('Failed to queue like operation, falling back to direct write');
+        await likeMessageDirect(conversationId, messageId, userId, isLiked);
+      } else {
+        logger.debug('Message like queued for write-behind', { 
+          conversationId, 
+          messageId, 
+          userId, 
+          isLiked 
+        });
+      }
+    } else {
+      // Direct write if write-behind is disabled
+      await likeMessageDirect(conversationId, messageId, userId, isLiked);
+    }
+    
+  } catch (error) {
+    logger.error('Error liking message:', error);
+    throw error;
+  }
+};
+
+/**
+ * Like message directly in Firebase (fallback)
  * @param {string} conversationId - Conversation ID
  * @param {string} messageId - Message ID
  * @param {string} userId - User ID who is liking
  * @param {boolean} isLiked - Whether to like (true) or unlike (false)
  * @returns {Promise<void>}
  */
-export const likeMessage = async (conversationId, messageId, userId, isLiked) => {
+const likeMessageDirect = async (conversationId, messageId, userId, isLiked) => {
   try {
     const firestore = getFirebaseFirestore();
     const conversationRef = firestore.collection(CONVERSATIONS_COLLECTION).doc(conversationId);
@@ -808,16 +1050,16 @@ export const likeMessage = async (conversationId, messageId, userId, isLiked) =>
     const [cacheUserId, characterId] = conversationId.split('_');
     await cache.del(cache.keys.conversation(cacheUserId, characterId));
     await cache.del(cache.keys.conversationMeta(conversationId));
-    await cache.del(cache.keys.conversationContext(conversationId));
+    await contextManager.invalidateContext(conversationId);
     
-    logger.debug('Message like updated', { 
+    logger.debug('Message like updated directly', { 
       conversationId, 
       messageId, 
       userId, 
       isLiked 
     });
   } catch (error) {
-    logger.error('Error liking message:', error);
+    logger.error('Error in direct message like:', error);
     throw error;
   }
 };

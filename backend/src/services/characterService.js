@@ -1,6 +1,7 @@
 /**
  * Character service
  * Handles all character-related database operations with caching
+ * Enhanced with Redis stat counters (Phase 2)
  */
 import { getFirebaseFirestore } from '../config/firebase.js';
 import { 
@@ -13,6 +14,7 @@ import { ApiError } from '../middleware/errorHandler.js';
 import cache from './cacheService.js';
 import { config } from '../config/environment.js';
 import logger from '../utils/logger.js';
+import statsSync from './statsSync.js';
 
 const CHARACTERS_COLLECTION = 'characters';
 
@@ -275,12 +277,189 @@ export const getCharacterStats = async (characterId) => {
 };
 
 /**
- * Update character statistics
+ * Update character statistics (Optimized with Redis counters - Phase 2)
+ * @param {string} characterId - Character ID
+ * @param {Object} statUpdates - Statistics to update (can be absolute values or increment objects)
+ * @param {boolean} [useRedisCounters=true] - Whether to use Redis counters
+ * @returns {Promise<void>}
+ */
+export const updateCharacterStats = async (characterId, statUpdates, useRedisCounters = true) => {
+  try {
+    // Use Redis counters if enabled
+    if (useRedisCounters && config.redis.batch.enableBatching) {
+      await updateCharacterStatsRedis(characterId, statUpdates);
+    } else {
+      await updateCharacterStatsDirect(characterId, statUpdates);
+    }
+  } catch (error) {
+    logger.error('Error updating character stats:', error);
+    // Don't throw - stat updates shouldn't break the flow
+  }
+};
+
+/**
+ * Increment character statistics (convenience method for Redis counters)
+ * @param {string} characterId - Character ID
+ * @param {Object} statIncrements - Statistics to increment by amount
+ * @returns {Promise<void>}
+ */
+export const incrementCharacterStats = async (characterId, statIncrements) => {
+  try {
+    const incrementPromises = [];
+    
+    for (const [statKey, incrementAmount] of Object.entries(statIncrements)) {
+      // Map stat keys to StatType enum values
+      let statType = null;
+      switch (statKey) {
+        case 'totalMessages':
+          statType = statsSync.StatType.TOTAL_MESSAGES;
+          break;
+        case 'totalConversations':
+          statType = statsSync.StatType.TOTAL_CONVERSATIONS;
+          break;
+        case 'totalLikes':
+          statType = statsSync.StatType.TOTAL_LIKES;
+          break;
+        case 'totalVoiceMessages':
+          statType = statsSync.StatType.TOTAL_VOICE_MESSAGES;
+          break;
+        case 'totalImageMessages':
+          statType = statsSync.StatType.TOTAL_IMAGE_MESSAGES;
+          break;
+      }
+      
+      if (statType && typeof incrementAmount === 'number') {
+        incrementPromises.push(
+          statsSync.incrementStat(characterId, statType, incrementAmount)
+        );
+      }
+    }
+    
+    if (incrementPromises.length > 0) {
+      await Promise.all(incrementPromises);
+      logger.debug('Character stats incremented', { 
+        characterId, 
+        increments: statIncrements 
+      });
+    }
+  } catch (error) {
+    logger.error('Error incrementing character stats:', error);
+  }
+};
+
+/**
+ * Update character stats using Redis counters (optimized path)
  * @param {string} characterId - Character ID
  * @param {Object} statUpdates - Statistics to update
  * @returns {Promise<void>}
  */
-export const updateCharacterStats = async (characterId, statUpdates) => {
+const updateCharacterStatsRedis = async (characterId, statUpdates) => {
+  try {
+    // We need to handle the legacy format where absolute values are passed
+    // Check if we're receiving absolute values (legacy) or increments
+    const character = await getCharacterById(characterId);
+    if (!character) {
+      logger.warn('Character not found for stats update', { characterId });
+      return;
+    }
+    
+    // Convert stat updates to Redis counter increments
+    const incrementPromises = [];
+    const nonIncrementUpdates = {};
+    
+    for (const [statKey, value] of Object.entries(statUpdates)) {
+      // Skip non-numeric and metadata fields
+      if (statKey === 'lastActiveAt' || statKey === 'updatedAt') {
+        nonIncrementUpdates[statKey] = value;
+        continue;
+      }
+      
+      // Map stat keys to StatType enum values
+      let statType = null;
+      let currentValue = 0;
+      
+      switch (statKey) {
+        case 'totalMessages':
+          statType = statsSync.StatType.TOTAL_MESSAGES;
+          currentValue = character.stats?.totalMessages || 0;
+          break;
+        case 'totalConversations':
+          statType = statsSync.StatType.TOTAL_CONVERSATIONS;
+          currentValue = character.stats?.totalConversations || 0;
+          break;
+        case 'totalLikes':
+          statType = statsSync.StatType.TOTAL_LIKES;
+          currentValue = character.stats?.totalLikes || 0;
+          break;
+        case 'totalVoiceMessages':
+          statType = statsSync.StatType.TOTAL_VOICE_MESSAGES;
+          currentValue = character.stats?.totalVoiceMessages || 0;
+          break;
+        case 'totalImageMessages':
+          statType = statsSync.StatType.TOTAL_IMAGE_MESSAGES;
+          currentValue = character.stats?.totalImageMessages || 0;
+          break;
+        default:
+          nonIncrementUpdates[statKey] = value;
+          continue;
+      }
+      
+      if (statType && typeof value === 'number') {
+        // Detect if this is an absolute value (legacy) or increment
+        // If the value is greater than current value, it's likely an absolute update
+        let incrementAmount = 1; // Default increment
+        
+        if (value > currentValue) {
+          // This is an absolute value, calculate the increment
+          incrementAmount = value - currentValue;
+        } else if (value <= currentValue && value > 0 && value < 10) {
+          // Small values (1-9) are likely increments
+          incrementAmount = value;
+        }
+        
+        if (incrementAmount > 0) {
+          incrementPromises.push(
+            statsSync.incrementStat(characterId, statType, incrementAmount)
+          );
+        }
+      }
+    }
+    
+    // Execute all increments in parallel
+    if (incrementPromises.length > 0) {
+      await Promise.all(incrementPromises);
+      logger.debug('Character stats incremented in Redis', { 
+        characterId, 
+        statCount: incrementPromises.length 
+      });
+    }
+    
+    // Handle non-increment updates (like lastActiveAt) with batching
+    if (Object.keys(nonIncrementUpdates).length > 0) {
+      const batchOperation = {
+        type: 'UPDATE_CHARACTER',
+        target: characterId,
+        data: { updates: nonIncrementUpdates },
+        metadata: { timestamp: Date.now() }
+      };
+      
+      // We could add this to message batcher or handle directly
+      await updateCharacterStatsDirect(characterId, nonIncrementUpdates);
+    }
+    
+  } catch (error) {
+    logger.error('Error updating character stats in Redis, falling back to direct:', error);
+    await updateCharacterStatsDirect(characterId, statUpdates);
+  }
+};
+
+/**
+ * Update character stats directly in Firebase (fallback path)
+ * @param {string} characterId - Character ID
+ * @param {Object} statUpdates - Statistics to update
+ * @returns {Promise<void>}
+ */
+const updateCharacterStatsDirect = async (characterId, statUpdates) => {
   try {
     const firestore = getFirebaseFirestore();
     
@@ -300,10 +479,10 @@ export const updateCharacterStats = async (characterId, statUpdates) => {
     await cache.del(cache.keys.character(characterId));
     await cache.del(cache.keys.characterStats(characterId));
     
-    logger.debug('Character stats updated', { characterId, statUpdates });
+    logger.debug('Character stats updated directly in Firebase', { characterId, statUpdates });
   } catch (error) {
-    logger.error('Error updating character stats:', error);
-    // Don't throw - stat updates shouldn't break the flow
+    logger.error('Error updating character stats directly:', error);
+    throw error;
   }
 };
 

@@ -18,6 +18,7 @@ import paymentRoutes from './routes/payments.js';
 import mediaRoutes from './routes/media.js';
 import webhookRoutes from './routes/webhooks.js';
 import websocketRoutes from './routes/websocket.js';
+import monitoringRoutes from './routes/monitoring.js';
 import { createQueueMonitor } from './config/queues.js';
 import { authenticate, requireAdmin } from './middleware/auth.js';
 
@@ -97,6 +98,7 @@ export const createApp = (queues = null) => {
   app.use('/api/payments', paymentRoutes);
   app.use('/api/media', mediaRoutes);
   app.use('/api/websocket', websocketRoutes);
+  app.use('/api/monitoring', monitoringRoutes);
 
   // Queue monitoring (admin only)
   if (queues) {

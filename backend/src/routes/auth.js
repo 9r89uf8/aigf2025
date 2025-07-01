@@ -399,14 +399,7 @@ router.get('/usage', authenticate, asyncHandler(async (req, res) => {
     },
     mostChattedCharacters
   };
-  
-  console.log('📤 USAGE DEBUG: Final response to frontend:', {
-    userId: req.user.uid,
-    characterCount: Object.keys(formattedUsage).length,
-    totalUsage,
-    response
-  });
-  console.log(response.usage)
+
   
   res.json(response);
 }));
