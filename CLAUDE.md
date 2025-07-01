@@ -316,10 +316,14 @@ The system has been optimized to reduce Firebase operations from 9-11 per messag
 #### Configuration:
 ```bash
 REDIS_ENABLE_BATCHING=true        # Toggle optimization on/off
-REDIS_BATCH_FLUSH_INTERVAL=5000   # Batch interval (ms)
+REDIS_BATCH_FLUSH_INTERVAL=60000  # Batch interval (ms) - Optimized for human conversations
 REDIS_BATCH_MAX_SIZE=400          # Max operations per batch
 REDIS_STATS_SYNC_INTERVAL=60000   # Stats sync interval (ms)
 ```
+
+#### Recent Optimizations:
+- **Batch Window Optimization**: Increased from 5s to 60s for better human conversation patterns
+- **See**: `FIREBASE_BATCH_WINDOW_OPTIMIZATION_PLAN.md` for detailed analysis and implementation
 
 When working with messaging operations, the optimization is automatic. Direct Firebase writes will fallback gracefully if Redis is unavailable.
 

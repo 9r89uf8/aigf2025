@@ -84,7 +84,7 @@ export const config = {
     },
     // Batch operation settings
     batch: {
-      flushInterval: parseInt(process.env.REDIS_BATCH_FLUSH_INTERVAL || '5000'), // 5 seconds
+      flushInterval: parseInt(process.env.REDIS_BATCH_FLUSH_INTERVAL || '60000'), // 60 seconds
       maxBufferSize: parseInt(process.env.REDIS_BATCH_MAX_SIZE || '400'), // Max operations before force flush
       lockTimeout: parseInt(process.env.REDIS_BATCH_LOCK_TIMEOUT || '10000'), // 10 seconds
       retryAttempts: parseInt(process.env.REDIS_BATCH_RETRY_ATTEMPTS || '3'),
